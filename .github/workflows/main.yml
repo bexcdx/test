@@ -57,18 +57,24 @@ jobs:
           # Clone repository
           RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
           
-          WORKDIR /app/telegram-bot-api/build
+          WORKDIR /app/telegram-bot-api
           
-          # Configure with static linking
-          RUN cmake -DCMAKE_BUILD_TYPE=Release \
+          # CRITICAL: Remove all .so files to force static linking
+          RUN find /usr/lib /lib -name "*.so*" -type f -delete 2>/dev/null || true
+          
+          # Also remove symlinks
+          RUN find /usr/lib /lib -name "*.so*" -type l -delete 2>/dev/null || true
+          
+          # Verify only .a files remain for our key libraries
+          RUN ls -la /usr/lib/libssl.a /usr/lib/libcrypto.a /usr/lib/libz.a
+          
+          # Now build
+          RUN mkdir build && cd build && \
+              cmake -DCMAKE_BUILD_TYPE=Release \
                     -DCMAKE_INSTALL_PREFIX=/output \
-                    -DCMAKE_C_FLAGS="-static" \
-                    -DCMAKE_CXX_FLAGS="-static" \
-                    -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
-                    ..
-          
-          # Build
-          RUN cmake --build . --target install -j$(nproc)
+                    -DCMAKE_EXE_LINKER_FLAGS="-static" \
+                    .. && \
+              cmake --build . --target install -j$(nproc)
           
           # Strip binary
           RUN strip /output/bin/telegram-bot-api
@@ -81,7 +87,7 @@ jobs:
               if ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic"; then \
                 echo "✓ SUCCESS: Fully static binary!"; \
               else \
-                echo "⚠ Dependencies found:"; \
+                echo "⚠ Warning: Dependencies found:"; \
                 ldd /output/bin/telegram-bot-api || true; \
               fi
           
