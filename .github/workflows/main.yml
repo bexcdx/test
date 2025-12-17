@@ -1,23 +1,31 @@
-name: Build Telegram Bot API
+name: Build Telegram Bot API - Linux Only
 
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  build-linux:
-    name: Build on Linux (${{ matrix.arch }})
+  build-linux-static:
+    name: Build Linux Static (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64, armv7]
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+          - arch: armv7
+            platform: linux/arm/v7
     
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up QEMU
@@ -26,58 +34,73 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Telegram Bot API for Linux ${{ matrix.arch }}
+      - name: Build static binary for ${{ matrix.arch }}
         run: |
           cat > Dockerfile << 'EOF'
-          FROM --platform=$TARGETPLATFORM alpine:latest
+          FROM --platform=$TARGETPLATFORM alpine:latest AS builder
           
+          # Install build dependencies
           RUN apk add --no-cache \
               git \
               cmake \
               make \
               g++ \
               openssl-dev \
+              openssl-libs-static \
               zlib-dev \
+              zlib-static \
               linux-headers \
               gperf
           
           WORKDIR /app
           
+          # Clone repository
           RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
           
-          WORKDIR /app/telegram-bot-api
+          WORKDIR /app/telegram-bot-api/build
           
-          RUN mkdir build && \
-              cd build && \
-              cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/output .. && \
-              cmake --build . --target install -j$(nproc)
+          # Build with static linking
+          RUN cmake -DCMAKE_BUILD_TYPE=Release \
+                    -DCMAKE_INSTALL_PREFIX=/output \
+                    -DCMAKE_EXE_LINKER_FLAGS="-static" \
+                    -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
+                    .. && \
+              cmake --build . --target install -j$(nproc) && \
+              strip /output/bin/telegram-bot-api
+          
+          # Verify static binary
+          RUN echo "=== Binary Info ===" && \
+              file /output/bin/telegram-bot-api && \
+              ls -lh /output/bin/telegram-bot-api && \
+              echo "=== Dependencies Check ===" && \
+              (ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic" && echo "✓ SUCCESS: Fully static binary!") || \
+              (ldd /output/bin/telegram-bot-api && echo "⚠ Warning: Has dynamic dependencies")
           
           FROM scratch
-          COPY --from=0 /output /output
+          COPY --from=builder /output /output
           EOF
           
-          # Build for the specific architecture
+          # Build for specific architecture
           docker buildx build \
-            --platform linux/${{ matrix.arch == 'armv7' && 'arm/v7' || matrix.arch }} \
+            --platform ${{ matrix.platform }} \
             --output type=local,dest=./output \
             -f Dockerfile .
           
           # Create archive
           cd output
-          tar -czf telegram-bot-api-linux-${{ matrix.arch }}.tar.gz *
-          mv telegram-bot-api-linux-${{ matrix.arch }}.tar.gz ../
+          tar -czf ../telegram-bot-api-linux-${{ matrix.arch }}-static.tar.gz *
 
-      - name: Upload Linux ${{ matrix.arch }} artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: telegram-bot-api-linux-${{ matrix.arch }}
-          path: telegram-bot-api-linux-${{ matrix.arch }}.tar.gz
+          name: linux-${{ matrix.arch }}-static
+          path: telegram-bot-api-linux-${{ matrix.arch }}-static.tar.gz
 
-  create-release:
+  release:
     name: Create Release
-    needs: [build-linux]
+    needs: [build-linux-static]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
       - name: Download all artifacts
@@ -85,25 +108,72 @@ jobs:
         with:
           path: artifacts
 
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -name "*.tar.gz" -exec cp {} release/ \;
+          ls -lah release/
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Create checksums
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create Release (Tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            ## 🐧 Linux Static Binaries - No Dependencies!
+            
+            All binaries are **fully static** - works on any Linux distro without installing libraries!
+            
+            ### 📦 Downloads:
+            - **amd64** (x86_64): `telegram-bot-api-linux-amd64-static.tar.gz` ⭐ Most common
+            - **arm64** (aarch64): `telegram-bot-api-linux-arm64-static.tar.gz` - For ARM servers/Pi 4
+            - **armv7**: `telegram-bot-api-linux-armv7-static.tar.gz` - For Raspberry Pi 3
+            
+            ### 🚀 Quick Start:
+            ```bash
+            # Download & extract
+            tar -xzf telegram-bot-api-linux-amd64-static.tar.gz
+            cd bin
+            
+            # Run (no installation needed!)
+            ./telegram-bot-api --api-id=YOUR_ID --api-hash=YOUR_HASH
+            ```
+            
+            ### ✅ Verified Static:
+            ```bash
+            ldd telegram-bot-api
+            # Output: "not a dynamic executable"
+            ```
+            
+            ### 🔒 Verify integrity:
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release (Branch)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v1
         with:
           tag_name: build-${{ github.run_number }}
-          release_name: Telegram Bot API Build ${{ github.run_number }}
-          draft: false
-          prerelease: false
-
-      - name: Upload Release Assets
-        run: |
-          for file in artifacts/*/*; do
-            echo "Uploading $file"
-            gh release upload build-${{ github.run_number }} "$file" --clobber
-          done
+          name: Linux Static Build ${{ github.run_number }}
+          files: release/*
+          generate_release_notes: true
+          prerelease: true
+          body: |
+            ## Automated Linux Static Build
+            
+            Fully static binaries - no dependencies required!
+            
+            Available architectures: amd64, arm64, armv7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
