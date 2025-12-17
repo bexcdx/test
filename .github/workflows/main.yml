@@ -37,7 +37,7 @@ jobs:
       - name: Build static binary for ${{ matrix.arch }}
         run: |
           cat > Dockerfile << 'EOF'
-          FROM --platform=$TARGETPLATFORM alpine:latest AS builder
+          FROM alpine:latest AS builder
           
           # Install build dependencies
           RUN apk add --no-cache \
@@ -59,22 +59,31 @@ jobs:
           
           WORKDIR /app/telegram-bot-api/build
           
-          # Build with static linking
+          # Configure with static linking
           RUN cmake -DCMAKE_BUILD_TYPE=Release \
                     -DCMAKE_INSTALL_PREFIX=/output \
-                    -DCMAKE_EXE_LINKER_FLAGS="-static" \
-                    -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
-                    .. && \
-              cmake --build . --target install -j$(nproc) && \
-              strip /output/bin/telegram-bot-api
+                    -DCMAKE_C_FLAGS="-static" \
+                    -DCMAKE_CXX_FLAGS="-static" \
+                    -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
+                    ..
           
-          # Verify static binary
+          # Build
+          RUN cmake --build . --target install -j$(nproc)
+          
+          # Strip binary
+          RUN strip /output/bin/telegram-bot-api
+          
+          # Verify it's static
           RUN echo "=== Binary Info ===" && \
               file /output/bin/telegram-bot-api && \
               ls -lh /output/bin/telegram-bot-api && \
-              echo "=== Dependencies Check ===" && \
-              (ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic" && echo "✓ SUCCESS: Fully static binary!") || \
-              (ldd /output/bin/telegram-bot-api && echo "⚠ Warning: Has dynamic dependencies")
+              echo "=== Checking if fully static ===" && \
+              if ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic"; then \
+                echo "✓ SUCCESS: Fully static binary!"; \
+              else \
+                echo "⚠ Dependencies found:"; \
+                ldd /output/bin/telegram-bot-api || true; \
+              fi
           
           FROM scratch
           COPY --from=builder /output /output
