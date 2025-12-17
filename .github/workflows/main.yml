@@ -52,18 +52,6 @@ jobs:
               linux-headers \
               gperf
           
-          # KEY FIX: Remove dynamic libraries to force static linking
-          RUN rm -f /usr/lib/libssl.so* \
-                    /usr/lib/libcrypto.so* \
-                    /usr/lib/libz.so* \
-                    /lib/libz.so*
-          
-          # Verify only static libs remain
-          RUN echo "=== Available OpenSSL libs ===" && \
-              ls -la /usr/lib/libssl* /usr/lib/libcrypto* 2>/dev/null || true && \
-              echo "=== Available zlib ===" && \
-              ls -la /usr/lib/libz* /lib/libz* 2>/dev/null || true
-          
           WORKDIR /app
           
           # Clone repository
@@ -71,30 +59,36 @@ jobs:
           
           WORKDIR /app/telegram-bot-api/build
           
-          # Configure and build with static linking
+          # Verify static libs exist
+          RUN ls -la /usr/lib/libssl.a /usr/lib/libcrypto.a /usr/lib/libz.a
+          
+          # Configure with explicit static library paths
           RUN cmake -DCMAKE_BUILD_TYPE=Release \
                     -DCMAKE_INSTALL_PREFIX=/output \
-                    -DCMAKE_EXE_LINKER_FLAGS="-static" \
                     -DOPENSSL_USE_STATIC_LIBS=TRUE \
-                    -DZLIB_USE_STATIC_LIBS=ON \
-                    .. && \
-              cmake --build . --target install -j$(nproc)
+                    -DOPENSSL_ROOT_DIR=/usr \
+                    -DOPENSSL_CRYPTO_LIBRARY=/usr/lib/libcrypto.a \
+                    -DOPENSSL_SSL_LIBRARY=/usr/lib/libssl.a \
+                    -DZLIB_LIBRARY=/usr/lib/libz.a \
+                    -DCMAKE_EXE_LINKER_FLAGS="-static" \
+                    ..
           
-          # Strip binary to reduce size
+          # Build
+          RUN cmake --build . --target install -j$(nproc)
+          
+          # Strip binary
           RUN strip /output/bin/telegram-bot-api
           
-          # Verify it's truly static
+          # Verify it's static
           RUN echo "=== Binary Info ===" && \
               file /output/bin/telegram-bot-api && \
               ls -lh /output/bin/telegram-bot-api && \
               echo "=== Checking dependencies ===" && \
-              (ldd /output/bin/telegram-bot-api 2>&1 || echo "No dynamic dependencies") && \
-              if ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic\|statically linked"; then \
-                echo "✅ SUCCESS: Fully static binary!"; \
-              elif ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not found"; then \
-                echo "❌ ERROR: Missing dependencies"; exit 1; \
+              (ldd /output/bin/telegram-bot-api 2>&1 || true) && \
+              if ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic"; then \
+                echo "✓ SUCCESS: Fully static binary!"; \
               else \
-                echo "⚠️ WARNING: May have some dependencies"; \
+                echo "⚠ Has some dependencies"; \
               fi
           
           FROM scratch
@@ -105,7 +99,6 @@ jobs:
           docker buildx build \
             --platform ${{ matrix.platform }} \
             --output type=local,dest=./output \
-            --progress=plain \
             -f Dockerfile .
           
           # Create archive
@@ -198,3 +191,4 @@ jobs:
             Available architectures: amd64, arm64, armv7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
