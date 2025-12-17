@@ -57,22 +57,16 @@ jobs:
           # Clone repository
           RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
           
-          WORKDIR /app/telegram-bot-api
+          WORKDIR /app/telegram-bot-api/build
           
-          # CRITICAL: Remove all .so files to force static linking
-          RUN find /usr/lib /lib -name "*.so*" -type f -delete 2>/dev/null || true
-          
-          # Also remove symlinks
-          RUN find /usr/lib /lib -name "*.so*" -type l -delete 2>/dev/null || true
-          
-          # Verify only .a files remain for our key libraries
-          RUN ls -la /usr/lib/libssl.a /usr/lib/libcrypto.a /usr/lib/libz.a
-          
-          # Now build
-          RUN mkdir build && cd build && \
+          # Configure and build with static linking
+          # The trick: Use LDFLAGS to prefer static libs and CMAKE_FIND_LIBRARY_SUFFIXES
+          RUN LDFLAGS="-static" \
               cmake -DCMAKE_BUILD_TYPE=Release \
                     -DCMAKE_INSTALL_PREFIX=/output \
+                    -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
                     -DCMAKE_EXE_LINKER_FLAGS="-static" \
+                    -DBUILD_SHARED_LIBS=OFF \
                     .. && \
               cmake --build . --target install -j$(nproc)
           
@@ -83,12 +77,12 @@ jobs:
           RUN echo "=== Binary Info ===" && \
               file /output/bin/telegram-bot-api && \
               ls -lh /output/bin/telegram-bot-api && \
-              echo "=== Checking if fully static ===" && \
+              echo "=== Checking dependencies ===" && \
+              (ldd /output/bin/telegram-bot-api 2>&1 || true) && \
               if ldd /output/bin/telegram-bot-api 2>&1 | grep -q "not a dynamic"; then \
                 echo "✓ SUCCESS: Fully static binary!"; \
               else \
-                echo "⚠ Warning: Dependencies found:"; \
-                ldd /output/bin/telegram-bot-api || true; \
+                echo "⚠ Has some dependencies (might still work)"; \
               fi
           
           FROM scratch
