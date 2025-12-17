@@ -1,0 +1,109 @@
+name: Build Telegram Bot API
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Build on Linux (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, armv7]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Telegram Bot API for Linux ${{ matrix.arch }}
+        run: |
+          cat > Dockerfile << 'EOF'
+          FROM --platform=$TARGETPLATFORM alpine:latest
+          
+          RUN apk add --no-cache \
+              git \
+              cmake \
+              make \
+              g++ \
+              openssl-dev \
+              zlib-dev \
+              linux-headers \
+              gperf
+          
+          WORKDIR /app
+          
+          RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
+          
+          WORKDIR /app/telegram-bot-api
+          
+          RUN mkdir build && \
+              cd build && \
+              cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/output .. && \
+              cmake --build . --target install -j$(nproc)
+          
+          FROM scratch
+          COPY --from=0 /output /output
+          EOF
+          
+          # Build for the specific architecture
+          docker buildx build \
+            --platform linux/${{ matrix.arch == 'armv7' && 'arm/v7' || matrix.arch }} \
+            --output type=local,dest=./output \
+            -f Dockerfile .
+          
+          # Create archive
+          cd output
+          tar -czf telegram-bot-api-linux-${{ matrix.arch }}.tar.gz *
+          mv telegram-bot-api-linux-${{ matrix.arch }}.tar.gz ../
+
+      - name: Upload Linux ${{ matrix.arch }} artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-bot-api-linux-${{ matrix.arch }}
+          path: telegram-bot-api-linux-${{ matrix.arch }}.tar.gz
+
+  create-release:
+    name: Create Release
+    needs: [build-linux]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: build-${{ github.run_number }}
+          release_name: Telegram Bot API Build ${{ github.run_number }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Assets
+        run: |
+          for file in artifacts/*/*; do
+            echo "Uploading $file"
+            gh release upload build-${{ github.run_number }} "$file" --clobber
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
